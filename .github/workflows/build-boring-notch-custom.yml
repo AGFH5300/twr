@@ -1,4 +1,4 @@
-name: Build Final Boring Notch
+name: Build Final Boring Notch v3
 
 on:
   push:
@@ -24,17 +24,29 @@ jobs:
 
       - name: Clone Boring Notch
         run: |
-          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-final
-          cd boring-notch-final
+          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-v3
+          cd boring-notch-v3
           git checkout 71e50d8a5edc1010ceffa34f34348157183b76e4
           git status --short
 
-      - name: Apply fullscreen panel-only hide patch
-        working-directory: boring-notch-final
+      - name: Apply fullscreen space suppression v3
+        working-directory: boring-notch-v3
         run: |
           python3 <<'PY'
           from pathlib import Path
 
+          # 1) Stop the notch NSPanel from being eligible for fullscreen Spaces.
+          win_path = Path("boringNotch/components/Notch/BoringNotchSkyLightWindow.swift")
+          win = win_path.read_text()
+          old = """        collectionBehavior = [\n            .fullScreenAuxiliary,\n            .stationary,\n            .canJoinAllSpaces,\n            .ignoresCycle,\n        ]\n"""
+          new = """        // Custom build: stay available on normal desktop Spaces, but do not\n        // join true macOS fullscreen Spaces. The app itself remains running.\n        collectionBehavior = [\n            .stationary,\n            .canJoinAllSpaces,\n            .ignoresCycle,\n        ]\n"""
+          if old not in win:
+              raise SystemExit("collectionBehavior anchor not found")
+          win = win.replace(old, new, 1)
+          win_path.write_text(win)
+
+          # 2) Fallback: if macOS still presents the panel during a fullscreen
+          # transition, make it fully transparent, non-interactive, and order it out.
           app_path = Path("boringNotch/boringNotchApp.swift")
           app = app_path.read_text()
 
@@ -45,6 +57,7 @@ jobs:
           new = (
               "    private var windowScreenDidChangeObserver: Any?\n"
               "    private var fullscreenVisibilityCancellable: AnyCancellable?\n"
+              "    private var fullscreenSuppressedScreens: Set<String> = []\n"
               "    private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector\n"
           )
           if old not in app:
@@ -58,19 +71,23 @@ jobs:
           cleanup_block = app[marker_start:marker_end]
 
           method_lines = [
-              "    // In fullscreen hide only the floating notch panel.",
-              "    // The app process and menu-bar/status item remain alive.",
               "    @MainActor",
-              "    private func applyFullscreenWindowVisibility(",
+              "    private func applyFullscreenSuppression(",
               "        _ fullscreenStatus: [String: Bool],",
               "        enabled: Bool",
               "    ) {",
-              "        func apply(to notchWindow: NSWindow, shouldHide: Bool) {",
+              "        func apply(to notchWindow: NSWindow, screenUUID: String) {",
+              "            let shouldHide = enabled && (fullscreenStatus[screenUUID] ?? false)",
+              "",
               "            if shouldHide {",
-              "                if notchWindow.isVisible {",
-              "                    notchWindow.orderOut(nil)",
-              "                }",
+              "                fullscreenSuppressedScreens.insert(screenUUID)",
+              "                notchWindow.ignoresMouseEvents = true",
+              "                notchWindow.alphaValue = 0",
+              "                notchWindow.orderOut(nil)",
               "            } else {",
+              "                fullscreenSuppressedScreens.remove(screenUUID)",
+              "                notchWindow.ignoresMouseEvents = false",
+              "                notchWindow.alphaValue = 1",
               "                if !notchWindow.isVisible {",
               "                    notchWindow.orderFrontRegardless()",
               "                }",
@@ -79,13 +96,12 @@ jobs:
               "",
               "        if Defaults[.showOnAllDisplays] {",
               "            for (uuid, notchWindow) in windows {",
-              "                let shouldHide = enabled && (fullscreenStatus[uuid] ?? false)",
-              "                apply(to: notchWindow, shouldHide: shouldHide)",
+              "                apply(to: notchWindow, screenUUID: uuid)",
               "            }",
               "        } else if let notchWindow = window {",
               "            let uuid = vm.screenUUID ?? coordinator.selectedScreenUUID",
-              "            let shouldHide = enabled && (fullscreenStatus[uuid] ?? false)",
-              "            apply(to: notchWindow, shouldHide: shouldHide)",
+              "            guard !uuid.isEmpty else { return }",
+              "            apply(to: notchWindow, screenUUID: uuid)",
               "        }",
               "    }",
               "",
@@ -93,12 +109,19 @@ jobs:
           ]
           app = app[:marker_start] + cleanup_block + "\n".join(method_lines) + app[marker_end:]
 
+          # Make any later reposition/recreation respect fullscreen suppression.
+          old = """        window.alphaValue = 1\n    }\n\n    func applicationDidFinishLaunching"""
+          new = """        let uuid = screen.displayUUID\n        let isSuppressed = uuid.map { fullscreenSuppressedScreens.contains($0) } ?? false\n        window.ignoresMouseEvents = isSuppressed\n        window.alphaValue = isSuppressed ? 0 : 1\n        if isSuppressed {\n            window.orderOut(nil)\n        }\n    }\n\n    func applicationDidFinishLaunching"""
+          if old not in app:
+              raise SystemExit("positionWindow anchor not found")
+          app = app.replace(old, new, 1)
+
           old = "        setupDragDetectors()\n\n        if coordinator.firstLaunch {\n"
           if old not in app:
               raise SystemExit("Launch anchor not found")
 
           launch_lines = [
-              "        // Native event-driven fullscreen detection: hide only the notch panel.",
+              "        // Native event-driven fullscreen detection with hard suppression fallback.",
               "        let fullscreenEnabledPublisher = Defaults",
               "            .publisher(.hideNotchOption)",
               "            .map(\\.newValue)",
@@ -113,12 +136,12 @@ jobs:
               "        .sink { [weak self] fullscreenStatus, enabled in",
               "            guard let self = self else { return }",
               "            Task { @MainActor in",
-              "                self.applyFullscreenWindowVisibility(fullscreenStatus, enabled: enabled)",
+              "                self.applyFullscreenSuppression(fullscreenStatus, enabled: enabled)",
               "            }",
               "        }",
               "",
               "        Task { @MainActor in",
-              "            self.applyFullscreenWindowVisibility(",
+              "            self.applyFullscreenSuppression(",
               "                FullscreenMediaDetector.shared.fullscreenStatus,",
               "                enabled: Defaults[.hideNotchOption] != .never",
               "            )",
@@ -132,31 +155,47 @@ jobs:
           app = app.replace(old, "\n".join(launch_lines), 1)
           app_path.write_text(app)
 
-          if "orderOut(nil)" not in app:
-              raise SystemExit("orderOut missing")
-          if "orderFrontRegardless()" not in app:
-              raise SystemExit("restore missing")
-          if "ignoresMouseEvents = isFullscreen" in app or "fullscreenCollapsed" in app:
-              raise SystemExit("old inert-visible fullscreen patch unexpectedly present")
+          # 3) Remove the residual closed-notch drawing in fullscreen as a third fallback.
+          vm_path = Path("boringNotch/models/BoringViewModel.swift")
+          vm = vm_path.read_text()
+          old = """    var effectiveClosedNotchHeight: CGFloat {\n        let currentScreen = screenUUID.flatMap { NSScreen.screen(withUUID: $0) }\n        let noNotchAndFullscreen = hideOnClosed && (currentScreen?.safeAreaInsets.top ?? 0 <= 0 || currentScreen == nil)\n        return noNotchAndFullscreen ? 0 : closedNotchSize.height\n    }\n"""
+          new = """    var effectiveClosedNotchHeight: CGFloat {\n        // Custom build: when fullscreen detection says hide, collapse the SwiftUI\n        // notch content to zero even on a display with a physical notch.\n        return hideOnClosed ? 0 : closedNotchSize.height\n    }\n"""
+          if old not in vm:
+              raise SystemExit("effectiveClosedNotchHeight anchor not found")
+          vm = vm.replace(old, new, 1)
+          vm_path.write_text(vm)
 
-          print("Fullscreen panel-only hide patch applied")
-          print("App stays running: yes")
-          print("Menu-bar item unaffected: yes")
-          print("Floating notch visible in fullscreen: no")
+          # Assertions for the exact behavior we want.
+          assert ".fullScreenAuxiliary" not in win
+          assert "fullscreenSuppressedScreens" in app
+          assert "notchWindow.alphaValue = 0" in app
+          assert "notchWindow.ignoresMouseEvents = true" in app
+          assert "notchWindow.orderOut(nil)" in app
+          assert "return hideOnClosed ? 0 : closedNotchSize.height" in vm
+
+          print("v3 fullscreen suppression applied")
+          print("fullScreenAuxiliary removed: yes")
+          print("alpha-zero fallback: yes")
+          print("mouse pass-through fallback: yes")
+          print("orderOut fallback: yes")
+          print("SwiftUI closed-notch height zero in fullscreen: yes")
           PY
 
           git diff --check
-          git diff -- boringNotch/boringNotchApp.swift
+          git diff -- \
+            boringNotch/components/Notch/BoringNotchSkyLightWindow.swift \
+            boringNotch/boringNotchApp.swift \
+            boringNotch/models/BoringViewModel.swift
 
       - name: Resolve Swift packages
-        working-directory: boring-notch-final
+        working-directory: boring-notch-v3
         run: |
           xcodebuild -resolvePackageDependencies \
             -project boringNotch.xcodeproj \
             -scheme boringNotch
 
       - name: Build Release app
-        working-directory: boring-notch-final
+        working-directory: boring-notch-v3
         run: |
           set -o pipefail
           xcodebuild clean build \
@@ -170,30 +209,35 @@ jobs:
             DEVELOPMENT_TEAM="" \
             ONLY_ACTIVE_ARCH=NO | tee build.log
 
-      - name: Locate and ad-hoc sign app
-        working-directory: boring-notch-final
+      - name: Mark and ad-hoc sign app
+        working-directory: boring-notch-v3
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
           test -d "$APP"
+
+          /usr/libexec/PlistBuddy -c 'Add :FullscreenFixVersion string v3-space-suppression' "$APP/Contents/Info.plist"
+
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist"
 
-      - name: Package final app
-        working-directory: boring-notch-final
+          echo "Bundle ID: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
+          echo "Fullscreen fix marker: $(/usr/libexec/PlistBuddy -c 'Print :FullscreenFixVersion' "$APP/Contents/Info.plist")"
+
+      - name: Package v3 app
+        working-directory: boring-notch-v3
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "$GITHUB_WORKSPACE/boringNotch-final.zip"
-          shasum -a 256 "$GITHUB_WORKSPACE/boringNotch-final.zip" > "$GITHUB_WORKSPACE/boringNotch-final.sha256"
-          cat "$GITHUB_WORKSPACE/boringNotch-final.sha256"
+          OUT="$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v3.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
+          shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v3.sha256"
+          cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v3.sha256"
 
-      - name: Upload final Boring Notch
+      - name: Upload v3 Boring Notch
         uses: actions/upload-artifact@v4
         with:
-          name: boringNotch-final
+          name: boringNotch-fullscreen-fix-v3
           path: |
-            boringNotch-final.zip
-            boringNotch-final.sha256
+            boringNotch-fullscreen-fix-v3.zip
+            boringNotch-fullscreen-fix-v3.sha256
           if-no-files-found: error
           retention-days: 7
