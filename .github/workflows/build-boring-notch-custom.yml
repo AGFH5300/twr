@@ -1,0 +1,239 @@
+name: Build Custom Boring Notch
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout build host
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26.6
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Clone Boring Notch
+        run: |
+          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-custom
+          cd boring-notch-custom
+          git checkout 71e50d8a5edc1010ceffa34f34348157183b76e4
+          git status --short
+
+      - name: Apply hard fullscreen window hide patch
+        working-directory: boring-notch-custom
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("boringNotch/boringNotchApp.swift")
+          text = path.read_text()
+
+          old = '''    private var windowScreenDidChangeObserver: Any?
+              private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector
+          '''
+          new = '''    private var windowScreenDidChangeObserver: Any?
+              private var fullscreenVisibilityCancellable: AnyCancellable?
+              private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector
+          '''
+
+          # Be tolerant of source indentation while still failing safely if the anchor changed.
+          if old not in text:
+              old = '''    private var windowScreenDidChangeObserver: Any?
+              private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector
+          '''
+
+          if old not in text:
+              # Exact current-upstream form.
+              old = "    private var windowScreenDidChangeObserver: Any?\n    private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector\n"
+              new = "    private var windowScreenDidChangeObserver: Any?\n    private var fullscreenVisibilityCancellable: AnyCancellable?\n    private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector\n"
+
+          if old not in text:
+              raise SystemExit("Patch anchor 1 not found")
+          text = text.replace(old, new, 1)
+
+          marker = '''    private func cleanupDragDetectors() {
+              dragDetectors.values.forEach { detector in
+                  detector.stopMonitoring()
+              }
+              dragDetectors.removeAll()
+          }
+          '''
+
+          if marker not in text:
+              marker = """    private func cleanupDragDetectors() {
+                  dragDetectors.values.forEach { detector in
+                      detector.stopMonitoring()
+                  }
+                  dragDetectors.removeAll()
+              }
+          """
+
+          if marker not in text:
+              # Normalize the exact source block from upstream.
+              start = text.find("    private func cleanupDragDetectors() {")
+              end = text.find("    private func setupDragDetectors()", start)
+              if start == -1 or end == -1:
+                  raise SystemExit("Patch anchor 2 not found")
+              marker = text[start:end]
+
+          addition = marker + '''    // Hard fullscreen hiding: remove the actual floating NSPanel while a
+              // fullscreen Space is active. The Boring Notch process and all of its
+              // state/services remain alive; only the overlay window is ordered out.
+              @MainActor
+              private func applyFullscreenWindowVisibility(
+                  _ fullscreenStatus: [String: Bool],
+                  enabled: Bool
+              ) {
+                  func apply(to notchWindow: NSWindow, shouldHide: Bool) {
+                      if shouldHide {
+                          if notchWindow.isVisible {
+                              notchWindow.orderOut(nil)
+                          }
+                      } else if !notchWindow.isVisible {
+                          notchWindow.orderFrontRegardless()
+                      }
+                  }
+
+                  if Defaults[.showOnAllDisplays] {
+                      for (uuid, notchWindow) in windows {
+                          apply(
+                              to: notchWindow,
+                              shouldHide: enabled && (fullscreenStatus[uuid] ?? false)
+                          )
+                      }
+                  } else if let notchWindow = window {
+                      let uuid = vm.screenUUID ?? coordinator.selectedScreenUUID
+                      apply(
+                          to: notchWindow,
+                          shouldHide: enabled && (fullscreenStatus[uuid] ?? false)
+                      )
+                  }
+              }
+
+          '''
+
+          text = text.replace(marker, addition, 1)
+
+          old_launch = '''        setupDragDetectors()
+
+              if coordinator.firstLaunch {
+          '''
+
+          if old_launch not in text:
+              old_launch = "        setupDragDetectors()\n\n        if coordinator.firstLaunch {\n"
+
+          if old_launch not in text:
+              raise SystemExit("Patch anchor 3 not found")
+
+          new_launch = '''        // Drive the actual AppKit notch panel directly from Boring Notch's
+              // existing event-driven fullscreen detector. No polling and no app quitting.
+              let fullscreenEnabledPublisher = Defaults
+                  .publisher(.hideNotchOption)
+                  .map(\\.newValue)
+                  .map { $0 != .never }
+                  .removeDuplicates()
+
+              fullscreenVisibilityCancellable = Publishers.CombineLatest(
+                  FullscreenMediaDetector.shared.$fullscreenStatus.removeDuplicates(),
+                  fullscreenEnabledPublisher
+              )
+              .receive(on: RunLoop.main)
+              .sink { [weak self] fullscreenStatus, enabled in
+                  guard let self = self else { return }
+                  Task { @MainActor in
+                      self.applyFullscreenWindowVisibility(
+                          fullscreenStatus,
+                          enabled: enabled
+                      )
+                  }
+              }
+
+              Task { @MainActor in
+                  self.applyFullscreenWindowVisibility(
+                      FullscreenMediaDetector.shared.fullscreenStatus,
+                      enabled: Defaults[.hideNotchOption] != .never
+                  )
+              }
+
+              setupDragDetectors()
+
+              if coordinator.firstLaunch {
+          '''
+
+          # Fix indentation generated by the YAML literal to normal Swift indentation.
+          new_launch = new_launch.replace("\n              ", "\n        ").replace("\n                  ", "\n            ")
+
+          text = text.replace(old_launch, new_launch, 1)
+          path.write_text(text)
+
+          print("Patch applied successfully")
+          print("orderOut calls:", text.count("orderOut(nil)"))
+          print("fullscreenVisibilityCancellable present:", "fullscreenVisibilityCancellable" in text)
+          PY
+
+          git diff --check
+          git diff -- boringNotch/boringNotchApp.swift
+
+      - name: Resolve Swift packages
+        working-directory: boring-notch-custom
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project boringNotch.xcodeproj \
+            -scheme boringNotch
+
+      - name: Build Release app
+        working-directory: boring-notch-custom
+        run: |
+          set -o pipefail
+          xcodebuild clean build \
+            -project boringNotch.xcodeproj \
+            -scheme boringNotch \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM="" \
+            ONLY_ACTIVE_ARCH=NO | tee build.log
+
+      - name: Locate and ad-hoc sign app
+        working-directory: boring-notch-custom
+        run: |
+          APP="$PWD/build/Build/Products/Release/boringNotch.app"
+          test -d "$APP"
+
+          # Ad-hoc signing is sufficient for a local personal build and does not
+          # require an Apple Developer certificate.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist"
+
+      - name: Package app
+        working-directory: boring-notch-custom
+        run: |
+          APP="$PWD/build/Build/Products/Release/boringNotch.app"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$GITHUB_WORKSPACE/boringNotch-custom.zip"
+          shasum -a 256 "$GITHUB_WORKSPACE/boringNotch-custom.zip" > "$GITHUB_WORKSPACE/boringNotch-custom.sha256"
+          cat "$GITHUB_WORKSPACE/boringNotch-custom.sha256"
+
+      - name: Upload custom Boring Notch
+        uses: actions/upload-artifact@v4
+        with:
+          name: boringNotch-custom
+          path: |
+            boringNotch-custom.zip
+            boringNotch-custom.sha256
+          if-no-files-found: error
+          retention-days: 7
