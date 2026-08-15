@@ -29,73 +29,11 @@ jobs:
           git checkout 71e50d8a5edc1010ceffa34f34348157183b76e4
           git status --short
 
-      - name: Apply fullscreen collapse and click-through patch
+      - name: Apply fullscreen panel-only hide patch
         working-directory: boring-notch-final
         run: |
           python3 <<'PY'
           from pathlib import Path
-
-          vm_path = Path("boringNotch/models/BoringViewModel.swift")
-          vm = vm_path.read_text()
-
-          old = "    @Published var hideOnClosed: Bool = true\n"
-          new = "    @Published var hideOnClosed: Bool = false\n    @Published var fullscreenCollapsed: Bool = false\n"
-          if old not in vm:
-              raise SystemExit("BoringViewModel anchor 1 not found")
-          vm = vm.replace(old, new, 1)
-
-          old = (
-              "            .sink { [weak self] shouldHide in\n"
-              "                withAnimation(.smooth) {\n"
-              "                    self?.hideOnClosed = shouldHide\n"
-              "                }\n"
-              "            }\n"
-          )
-          new = (
-              "            .sink { [weak self] _ in\n"
-              "                // Keep the collapsed notch visible in fullscreen.\n"
-              "                withAnimation(.smooth) {\n"
-              "                    self?.hideOnClosed = false\n"
-              "                }\n"
-              "            }\n"
-          )
-          if old not in vm:
-              raise SystemExit("BoringViewModel anchor 2 not found")
-          vm = vm.replace(old, new, 1)
-
-          old = (
-              "    func open() {\n"
-              "        self.notchSize = openNotchSize\n"
-              "        self.notchState = .open\n"
-          )
-          new = (
-              "    func open() {\n"
-              "        guard !fullscreenCollapsed else { return }\n"
-              "        self.notchSize = openNotchSize\n"
-              "        self.notchState = .open\n"
-          )
-          if old not in vm:
-              raise SystemExit("BoringViewModel anchor 3 not found")
-          vm = vm.replace(old, new, 1)
-
-          old = (
-              "    func close() {\n"
-              "        // Do not close while a share picker or sharing service is active\n"
-              "        if SharingStateManager.shared.preventNotchClose {\n"
-              "            return\n"
-              "        }\n"
-          )
-          new = (
-              "    func close(force: Bool = false) {\n"
-              "        // Normal closes respect sharing; fullscreen may force collapse.\n"
-              "        if !force && SharingStateManager.shared.preventNotchClose {\n"
-              "            return\n"
-              "        }\n"
-          )
-          if old not in vm:
-              raise SystemExit("BoringViewModel anchor 4 not found")
-          vm = vm.replace(old, new, 1)
-          vm_path.write_text(vm)
 
           app_path = Path("boringNotch/boringNotchApp.swift")
           app = app_path.read_text()
@@ -106,71 +44,68 @@ jobs:
           )
           new = (
               "    private var windowScreenDidChangeObserver: Any?\n"
-              "    private var fullscreenCollapseCancellable: AnyCancellable?\n"
+              "    private var fullscreenVisibilityCancellable: AnyCancellable?\n"
               "    private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector\n"
           )
           if old not in app:
-              raise SystemExit("AppDelegate anchor 1 not found")
+              raise SystemExit("AppDelegate property anchor not found")
           app = app.replace(old, new, 1)
 
           marker_start = app.find("    private func cleanupDragDetectors() {")
           marker_end = app.find("    private func setupDragDetectors()", marker_start)
           if marker_start == -1 or marker_end == -1:
-              raise SystemExit("AppDelegate anchor 2 not found")
+              raise SystemExit("AppDelegate method anchor not found")
           cleanup_block = app[marker_start:marker_end]
 
           method_lines = [
-              "    // Keep the notch visible but collapsed and click-through in fullscreen.",
+              "    // In fullscreen hide only the floating notch panel.",
+              "    // The app process and menu-bar/status item remain alive.",
               "    @MainActor",
-              "    private func applyFullscreenCollapse(",
+              "    private func applyFullscreenWindowVisibility(",
               "        _ fullscreenStatus: [String: Bool],",
               "        enabled: Bool",
               "    ) {",
-              "        func apply(",
-              "            window notchWindow: NSWindow,",
-              "            viewModel: BoringViewModel,",
-              "            screenUUID: String?",
-              "        ) {",
-              "            let isFullscreen = enabled",
-              "                && screenUUID.map { fullscreenStatus[$0] ?? false } == true",
-              "",
-              "            viewModel.fullscreenCollapsed = isFullscreen",
-              "            notchWindow.ignoresMouseEvents = isFullscreen",
-              "",
-              "            if isFullscreen {",
-              "                viewModel.close(force: true)",
+              "        func apply(to notchWindow: NSWindow, shouldHide: Bool) {",
+              "            if shouldHide {",
+              "                if notchWindow.isVisible {",
+              "                    notchWindow.orderOut(nil)",
+              "                }",
+              "            } else {",
+              "                if !notchWindow.isVisible {",
+              "                    notchWindow.orderFrontRegardless()",
+              "                }",
               "            }",
               "        }",
               "",
               "        if Defaults[.showOnAllDisplays] {",
               "            for (uuid, notchWindow) in windows {",
-              "                guard let viewModel = viewModels[uuid] else { continue }",
-              "                apply(window: notchWindow, viewModel: viewModel, screenUUID: uuid)",
+              "                let shouldHide = enabled && (fullscreenStatus[uuid] ?? false)",
+              "                apply(to: notchWindow, shouldHide: shouldHide)",
               "            }",
               "        } else if let notchWindow = window {",
               "            let uuid = vm.screenUUID ?? coordinator.selectedScreenUUID",
-              "            apply(window: notchWindow, viewModel: vm, screenUUID: uuid)",
+              "            let shouldHide = enabled && (fullscreenStatus[uuid] ?? false)",
+              "            apply(to: notchWindow, shouldHide: shouldHide)",
               "        }",
               "    }",
               "",
               "",
           ]
-          addition = cleanup_block + "\n".join(method_lines)
-          app = app[:marker_start] + addition + app[marker_end:]
+          app = app[:marker_start] + cleanup_block + "\n".join(method_lines) + app[marker_end:]
 
           old = "        setupDragDetectors()\n\n        if coordinator.firstLaunch {\n"
           if old not in app:
-              raise SystemExit("AppDelegate anchor 3 not found")
+              raise SystemExit("Launch anchor not found")
 
           launch_lines = [
-              "        // Native event-driven fullscreen detection; no polling or app restart.",
+              "        // Native event-driven fullscreen detection: hide only the notch panel.",
               "        let fullscreenEnabledPublisher = Defaults",
               "            .publisher(.hideNotchOption)",
               "            .map(\\.newValue)",
               "            .map { $0 != .never }",
               "            .removeDuplicates()",
               "",
-              "        fullscreenCollapseCancellable = Publishers.CombineLatest(",
+              "        fullscreenVisibilityCancellable = Publishers.CombineLatest(",
               "            FullscreenMediaDetector.shared.$fullscreenStatus.removeDuplicates(),",
               "            fullscreenEnabledPublisher",
               "        )",
@@ -178,12 +113,12 @@ jobs:
               "        .sink { [weak self] fullscreenStatus, enabled in",
               "            guard let self = self else { return }",
               "            Task { @MainActor in",
-              "                self.applyFullscreenCollapse(fullscreenStatus, enabled: enabled)",
+              "                self.applyFullscreenWindowVisibility(fullscreenStatus, enabled: enabled)",
               "            }",
               "        }",
               "",
               "        Task { @MainActor in",
-              "            self.applyFullscreenCollapse(",
+              "            self.applyFullscreenWindowVisibility(",
               "                FullscreenMediaDetector.shared.fullscreenStatus,",
               "                enabled: Defaults[.hideNotchOption] != .never",
               "            )",
@@ -197,21 +132,21 @@ jobs:
           app = app.replace(old, "\n".join(launch_lines), 1)
           app_path.write_text(app)
 
-          if "fullscreenCollapsed" not in app:
-              raise SystemExit("fullscreenCollapsed wiring missing")
-          if "ignoresMouseEvents = isFullscreen" not in app:
-              raise SystemExit("click-through wiring missing")
-          if "applyFullscreenWindowVisibility" in app:
-              raise SystemExit("old hard-hide patch unexpectedly present")
+          if "orderOut(nil)" not in app:
+              raise SystemExit("orderOut missing")
+          if "orderFrontRegardless()" not in app:
+              raise SystemExit("restore missing")
+          if "ignoresMouseEvents = isFullscreen" in app or "fullscreenCollapsed" in app:
+              raise SystemExit("old inert-visible fullscreen patch unexpectedly present")
 
-          print("Final patch applied")
-          print("Visible in fullscreen: yes")
-          print("Forced closed in fullscreen: yes")
-          print("Mouse click-through in fullscreen: yes")
+          print("Fullscreen panel-only hide patch applied")
+          print("App stays running: yes")
+          print("Menu-bar item unaffected: yes")
+          print("Floating notch visible in fullscreen: no")
           PY
 
           git diff --check
-          git diff -- boringNotch/boringNotchApp.swift boringNotch/models/BoringViewModel.swift
+          git diff -- boringNotch/boringNotchApp.swift
 
       - name: Resolve Swift packages
         working-directory: boring-notch-final
