@@ -56,8 +56,27 @@ jobs:
               raise SystemExit("AppDelegate property anchor not found")
           app = app.replace(old, new, 1)
 
-          old = """        MusicManager.shared.destroy()\n        cleanupDragDetectors()\n        cleanupWindows()\n        XPCHelperClient.shared.stopMonitoringAccessibilityAuthorization()\n"""
-          new = """        MusicManager.shared.destroy()\n        menuBarRefreshWorkItem?.cancel()\n        if let monitor = globalMenuBarMouseMonitor {\n            NSEvent.removeMonitor(monitor)\n            globalMenuBarMouseMonitor = nil\n        }\n        if let monitor = localMenuBarMouseMonitor {\n            NSEvent.removeMonitor(monitor)\n            localMenuBarMouseMonitor = nil\n        }\n        cleanupDragDetectors()\n        cleanupWindows()\n        XPCHelperClient.shared.stopMonitoringAccessibilityAuthorization()\n"""
+          old = (
+              "        MusicManager.shared.destroy()\n"
+              "        cleanupDragDetectors()\n"
+              "        cleanupWindows()\n"
+              "        XPCHelperClient.shared.stopMonitoringAccessibilityAuthorization()\n"
+          )
+          new = (
+              "        MusicManager.shared.destroy()\n"
+              "        menuBarRefreshWorkItem?.cancel()\n"
+              "        if let monitor = globalMenuBarMouseMonitor {\n"
+              "            NSEvent.removeMonitor(monitor)\n"
+              "            globalMenuBarMouseMonitor = nil\n"
+              "        }\n"
+              "        if let monitor = localMenuBarMouseMonitor {\n"
+              "            NSEvent.removeMonitor(monitor)\n"
+              "            localMenuBarMouseMonitor = nil\n"
+              "        }\n"
+              "        cleanupDragDetectors()\n"
+              "        cleanupWindows()\n"
+              "        XPCHelperClient.shared.stopMonitoringAccessibilityAuthorization()\n"
+          )
           if old not in app:
               raise SystemExit("terminate anchor not found")
           app = app.replace(old, new, 1)
@@ -68,96 +87,88 @@ jobs:
               raise SystemExit("method anchor not found")
           cleanup_block = app[marker_start:marker_end]
 
-          methods = '''    @MainActor
-    private func refreshFullscreenMenuBarVisibility() {
-        let menuBarVisible = NSMenu.menuBarVisible()
-        let mouseLocation = NSEvent.mouseLocation
+          method_lines = [
+              "    @MainActor",
+              "    private func refreshFullscreenMenuBarVisibility() {",
+              "        let menuBarVisible = NSMenu.menuBarVisible()",
+              "        let mouseLocation = NSEvent.mouseLocation",
+              "",
+              "        func apply(",
+              "            to notchWindow: NSWindow,",
+              "            viewModel: BoringViewModel,",
+              "            screenUUID: String",
+              "        ) {",
+              "            let isFullscreen = fullscreenBehaviorEnabled",
+              "                && (fullscreenStatusSnapshot[screenUUID] ?? false)",
+              "            let mouseIsOnScreen = NSScreen.screen(withUUID: screenUUID)?",
+              "                .frame.contains(mouseLocation) ?? false",
+              "            let shouldShow = !isFullscreen || (menuBarVisible && mouseIsOnScreen)",
+              "",
+              "            if shouldShow {",
+              "                notchWindow.ignoresMouseEvents = false",
+              "                notchWindow.alphaValue = 1",
+              "                if !notchWindow.isVisible {",
+              "                    notchWindow.orderFrontRegardless()",
+              "                }",
+              "            } else {",
+              "                viewModel.close()",
+              "                notchWindow.ignoresMouseEvents = true",
+              "                notchWindow.alphaValue = 0",
+              "                if notchWindow.isVisible {",
+              "                    notchWindow.orderOut(nil)",
+              "                }",
+              "            }",
+              "        }",
+              "",
+              "        if Defaults[.showOnAllDisplays] {",
+              "            for (uuid, notchWindow) in windows {",
+              "                guard let viewModel = viewModels[uuid] else { continue }",
+              "                apply(to: notchWindow, viewModel: viewModel, screenUUID: uuid)",
+              "            }",
+              "        } else if let notchWindow = window {",
+              "            let uuid = vm.screenUUID ?? coordinator.selectedScreenUUID",
+              "            guard !uuid.isEmpty else { return }",
+              "            apply(to: notchWindow, viewModel: vm, screenUUID: uuid)",
+              "        }",
+              "    }",
+              "",
+              "    @MainActor",
+              "    private func handleMenuBarMouseActivity() {",
+              "        refreshFullscreenMenuBarVisibility()",
+              "        menuBarRefreshWorkItem?.cancel()",
+              "        let item = DispatchWorkItem { [weak self] in",
+              "            Task { @MainActor in",
+              "                self?.refreshFullscreenMenuBarVisibility()",
+              "            }",
+              "        }",
+              "        menuBarRefreshWorkItem = item",
+              "        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)",
+              "    }",
+              "",
+              "    @MainActor",
+              "    private func setupFullscreenMenuBarEventMonitors() {",
+              "        let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .leftMouseUp]",
+              "",
+              "        globalMenuBarMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in",
+              "            Task { @MainActor in",
+              "                self?.handleMenuBarMouseActivity()",
+              "            }",
+              "        }",
+              "",
+              "        localMenuBarMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in",
+              "            Task { @MainActor in",
+              "                self?.handleMenuBarMouseActivity()",
+              "            }",
+              "            return event",
+              "        }",
+              "    }",
+              "",
+              "",
+          ]
+          app = app[:marker_start] + cleanup_block + "\n".join(method_lines) + app[marker_end:]
 
-        func apply(
-            to notchWindow: NSWindow,
-            viewModel: BoringViewModel,
-            screenUUID: String
-        ) {
-            let isFullscreen = fullscreenBehaviorEnabled
-                && (fullscreenStatusSnapshot[screenUUID] ?? false)
-            let mouseIsOnScreen = NSScreen.screen(withUUID: screenUUID)?
-                .frame.contains(mouseLocation) ?? false
-
-            // Outside fullscreen Boring Notch behaves normally.
-            // In fullscreen it exists only while the auto-hidden macOS menu bar
-            // is actually visible on the screen the pointer is using.
-            let shouldShow = !isFullscreen || (menuBarVisible && mouseIsOnScreen)
-
-            if shouldShow {
-                notchWindow.ignoresMouseEvents = false
-                notchWindow.alphaValue = 1
-                if !notchWindow.isVisible {
-                    notchWindow.orderFrontRegardless()
-                }
-            } else {
-                viewModel.close()
-                notchWindow.ignoresMouseEvents = true
-                notchWindow.alphaValue = 0
-                if notchWindow.isVisible {
-                    notchWindow.orderOut(nil)
-                }
-            }
-        }
-
-        if Defaults[.showOnAllDisplays] {
-            for (uuid, notchWindow) in windows {
-                guard let viewModel = viewModels[uuid] else { continue }
-                apply(to: notchWindow, viewModel: viewModel, screenUUID: uuid)
-            }
-        } else if let notchWindow = window {
-            let uuid = vm.screenUUID ?? coordinator.selectedScreenUUID
-            guard !uuid.isEmpty else { return }
-            apply(to: notchWindow, viewModel: vm, screenUUID: uuid)
-        }
-    }
-
-    @MainActor
-    private func handleMenuBarMouseActivity() {
-        refreshFullscreenMenuBarVisibility()
-
-        // The macOS menu bar reveal/hide animation may complete after the
-        // triggering mouseMoved event. Debounce one delayed re-check; this is
-        // event-driven, not periodic polling.
-        menuBarRefreshWorkItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                self?.refreshFullscreenMenuBarVisibility()
-            }
-        }
-        menuBarRefreshWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
-    }
-
-    @MainActor
-    private func setupFullscreenMenuBarEventMonitors() {
-        let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .leftMouseUp]
-
-        globalMenuBarMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
-            Task { @MainActor in
-                self?.handleMenuBarMouseActivity()
-            }
-        }
-
-        localMenuBarMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-            Task { @MainActor in
-                self?.handleMenuBarMouseActivity()
-            }
-            return event
-        }
-    }
-
-'''
-          app = app[:marker_start] + cleanup_block + methods + app[marker_end:]
-
-          # Any screen/window reposition should immediately re-apply the current
-          # fullscreen/menu-bar visibility state instead of forcing the panel visible.
-          old = """        window.alphaValue = 1\n    }\n\n    func applicationDidFinishLaunching"""
-          new = """        window.alphaValue = 1\n        refreshFullscreenMenuBarVisibility()\n    }\n\n    func applicationDidFinishLaunching"""
+          old = "        window.alphaValue = 1\n    }\n\n    func applicationDidFinishLaunching"
+          new = "        window.alphaValue = 1\n        refreshFullscreenMenuBarVisibility()\n    }\n\n    func applicationDidFinishLaunching"
           if old not in app:
               raise SystemExit("positionWindow anchor not found")
           app = app.replace(old, new, 1)
@@ -166,66 +177,62 @@ jobs:
           if old not in app:
               raise SystemExit("launch anchor not found")
 
-          launch = '''        // Keep Boring Notch in fullscreen only while the real macOS menu bar
-        // is revealed. Fullscreen status remains event-driven.
-        let fullscreenEnabledPublisher = Defaults
-            .publisher(.hideNotchOption)
-            .map(\\.newValue)
-            .map { $0 != .never }
-            .removeDuplicates()
-
-        fullscreenVisibilityCancellable = Publishers.CombineLatest(
-            FullscreenMediaDetector.shared.$fullscreenStatus.removeDuplicates(),
-            fullscreenEnabledPublisher
-        )
-        .receive(on: RunLoop.main)
-        .sink { [weak self] fullscreenStatus, enabled in
-            guard let self = self else { return }
-            Task { @MainActor in
-                self.fullscreenStatusSnapshot = fullscreenStatus
-                self.fullscreenBehaviorEnabled = enabled
-                self.refreshFullscreenMenuBarVisibility()
-            }
-        }
-
-        fullscreenStatusSnapshot = FullscreenMediaDetector.shared.fullscreenStatus
-        fullscreenBehaviorEnabled = Defaults[.hideNotchOption] != .never
-        setupFullscreenMenuBarEventMonitors()
-        refreshFullscreenMenuBarVisibility()
-
-        setupDragDetectors()
-
-        if coordinator.firstLaunch {
-'''
-          app = app.replace(old, launch, 1)
+          launch_lines = [
+              "        let fullscreenEnabledPublisher = Defaults",
+              "            .publisher(.hideNotchOption)",
+              "            .map(\\.newValue)",
+              "            .map { $0 != .never }",
+              "            .removeDuplicates()",
+              "",
+              "        fullscreenVisibilityCancellable = Publishers.CombineLatest(",
+              "            FullscreenMediaDetector.shared.$fullscreenStatus.removeDuplicates(),",
+              "            fullscreenEnabledPublisher",
+              "        )",
+              "        .receive(on: RunLoop.main)",
+              "        .sink { [weak self] fullscreenStatus, enabled in",
+              "            guard let self = self else { return }",
+              "            Task { @MainActor in",
+              "                self.fullscreenStatusSnapshot = fullscreenStatus",
+              "                self.fullscreenBehaviorEnabled = enabled",
+              "                self.refreshFullscreenMenuBarVisibility()",
+              "            }",
+              "        }",
+              "",
+              "        fullscreenStatusSnapshot = FullscreenMediaDetector.shared.fullscreenStatus",
+              "        fullscreenBehaviorEnabled = Defaults[.hideNotchOption] != .never",
+              "        setupFullscreenMenuBarEventMonitors()",
+              "        refreshFullscreenMenuBarVisibility()",
+              "",
+              "        setupDragDetectors()",
+              "",
+              "        if coordinator.firstLaunch {",
+              "",
+          ]
+          app = app.replace(old, "\n".join(launch_lines), 1)
           app_path.write_text(app)
 
-          # Disable the stock SwiftUI-only fullscreen hide. v4 owns visibility at
-          # the NSPanel level so the notch can return when the menu bar is revealed.
           vm_path = Path("boringNotch/models/BoringViewModel.swift")
           vm = vm_path.read_text()
-          old = '''            .sink { [weak self] shouldHide in
-                withAnimation(.smooth) {
-                    self?.hideOnClosed = shouldHide
-                }
-            }
-'''
-          new = '''            .sink { [weak self] _ in
-                withAnimation(.smooth) {
-                    self?.hideOnClosed = false
-                }
-            }
-'''
+          old = (
+              "            .sink { [weak self] shouldHide in\n"
+              "                withAnimation(.smooth) {\n"
+              "                    self?.hideOnClosed = shouldHide\n"
+              "                }\n"
+              "            }\n"
+          )
+          new = (
+              "            .sink { [weak self] _ in\n"
+              "                withAnimation(.smooth) {\n"
+              "                    self?.hideOnClosed = false\n"
+              "                }\n"
+              "            }\n"
+          )
           if old not in vm:
               raise SystemExit("BoringViewModel fullscreen sink anchor not found")
           vm = vm.replace(old, new, 1)
           vm_path.write_text(vm)
 
-          # Leave BoringNotchSkyLightWindow's original .fullScreenAuxiliary
-          # untouched: the window must be capable of appearing in a fullscreen
-          # Space when the real menu bar is revealed.
           win = Path("boringNotch/components/Notch/BoringNotchSkyLightWindow.swift").read_text()
-
           assert ".fullScreenAuxiliary" in win
           assert "NSMenu.menuBarVisible()" in app
           assert "addGlobalMonitorForEvents" in app
@@ -237,7 +244,7 @@ jobs:
           print("v4 fullscreen menu-bar sync applied")
           print("fullScreenAuxiliary retained: yes")
           print("hidden while menu bar hidden: yes")
-          print("shown/clickable while menu bar revealed: yes")
+          print("shown while menu bar revealed: yes")
           print("periodic polling: no")
           PY
 
