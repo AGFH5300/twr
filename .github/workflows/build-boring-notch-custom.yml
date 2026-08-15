@@ -1,4 +1,4 @@
-name: Build Final Boring Notch v5
+name: Build Final Boring Notch v6
 
 on:
   push:
@@ -24,13 +24,13 @@ jobs:
 
       - name: Clone Boring Notch
         run: |
-          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-v5
-          cd boring-notch-v5
+          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-v6
+          cd boring-notch-v6
           git checkout 71e50d8a5edc1010ceffa34f34348157183b76e4
           git status --short
 
-      - name: Apply top-edge fullscreen reveal latch v5
-        working-directory: boring-notch-v5
+      - name: Apply alpha-only fullscreen reveal v6
+        working-directory: boring-notch-v6
         run: |
           python3 <<'PY'
           from pathlib import Path
@@ -112,9 +112,8 @@ jobs:
               "                viewModel.close()",
               "                notchWindow.ignoresMouseEvents = true",
               "                notchWindow.alphaValue = 0",
-              "                if notchWindow.isVisible {",
-              "                    notchWindow.orderOut(nil)",
-              "                }",
+              "                // IMPORTANT: do not orderOut here. Keeping the NSPanel",
+              "                // resident in the fullscreen Space makes reveal reliable.",
               "            }",
               "        }",
               "",
@@ -133,7 +132,6 @@ jobs:
               "    @MainActor",
               "    private func scheduleFullscreenRevealHide(for screenUUID: String) {",
               "        menuBarHideWorkItems[screenUUID]?.cancel()",
-              "",
               "        let item = DispatchWorkItem { [weak self] in",
               "            Task { @MainActor in",
               "                guard let self = self else { return }",
@@ -142,25 +140,19 @@ jobs:
               "                self.refreshFullscreenRevealVisibility()",
               "            }",
               "        }",
-              "",
               "        menuBarHideWorkItems[screenUUID] = item",
-              "        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: item)",
+              "        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55, execute: item)",
               "    }",
               "",
               "    @MainActor",
               "    private func handleFullscreenMouseActivity() {",
               "        let mouseLocation = NSEvent.mouseLocation",
-              "",
               "        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }),",
               "              let uuid = screen.displayUUID",
-              "        else {",
-              "            refreshFullscreenRevealVisibility()",
-              "            return",
-              "        }",
+              "        else { return }",
               "",
               "        let isFullscreen = fullscreenBehaviorEnabled",
               "            && (fullscreenStatusSnapshot[uuid] ?? false)",
-              "",
               "        guard isFullscreen else {",
               "            menuBarHideWorkItems[uuid]?.cancel()",
               "            menuBarHideWorkItems.removeValue(forKey: uuid)",
@@ -170,11 +162,11 @@ jobs:
               "        }",
               "",
               "        let distanceFromTop = max(0, screen.frame.maxY - mouseLocation.y)",
-              "        let topEdgeTrigger: CGFloat = 4",
+              "        let topEdgeTrigger: CGFloat = 8",
               "        let interactionBand = max(",
-              "            CGFloat(52),",
-              "            screen.safeAreaInsets.top + 16,",
-              "            NSStatusBar.system.thickness + 24",
+              "            CGFloat(76),",
+              "            screen.safeAreaInsets.top + 28,",
+              "            NSStatusBar.system.thickness + 36",
               "        )",
               "",
               "        let viewModel: BoringViewModel?",
@@ -183,12 +175,8 @@ jobs:
               "        } else {",
               "            viewModel = vm.screenUUID == uuid ? vm : nil",
               "        }",
-              "",
               "        let interactingWithNotch = viewModel?.isMouseHovering(position: mouseLocation) ?? false",
               "",
-              "        // Only touching the literal top edge arms the reveal. This avoids",
-              "        // bringing Boring Notch back merely because the pointer is on a",
-              "        // Chrome tab near the top of the fullscreen window.",
               "        if distanceFromTop <= topEdgeTrigger {",
               "            menuBarHideWorkItems[uuid]?.cancel()",
               "            menuBarHideWorkItems.removeValue(forKey: uuid)",
@@ -197,10 +185,7 @@ jobs:
               "            return",
               "        }",
               "",
-              "        guard fullscreenMenuBarRevealScreens.contains(uuid) else {",
-              "            refreshFullscreenRevealVisibility()",
-              "            return",
-              "        }",
+              "        guard fullscreenMenuBarRevealScreens.contains(uuid) else { return }",
               "",
               "        if distanceFromTop <= interactionBand || interactingWithNotch {",
               "            menuBarHideWorkItems[uuid]?.cancel()",
@@ -219,17 +204,11 @@ jobs:
               "            .leftMouseDown,",
               "            .leftMouseUp,",
               "        ]",
-              "",
               "        globalFullscreenMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in",
-              "            Task { @MainActor in",
-              "                self?.handleFullscreenMouseActivity()",
-              "            }",
+              "            Task { @MainActor in self?.handleFullscreenMouseActivity() }",
               "        }",
-              "",
               "        localFullscreenMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in",
-              "            Task { @MainActor in",
-              "                self?.handleFullscreenMouseActivity()",
-              "            }",
+              "            Task { @MainActor in self?.handleFullscreenMouseActivity() }",
               "            return event",
               "        }",
               "    }",
@@ -247,7 +226,6 @@ jobs:
           old = "        setupDragDetectors()\n\n        if coordinator.firstLaunch {\n"
           if old not in app:
               raise SystemExit("launch anchor not found")
-
           launch_lines = [
               "        let fullscreenEnabledPublisher = Defaults",
               "            .publisher(.hideNotchOption)",
@@ -265,13 +243,7 @@ jobs:
               "            Task { @MainActor in",
               "                self.fullscreenStatusSnapshot = fullscreenStatus",
               "                self.fullscreenBehaviorEnabled = enabled",
-              "",
-              "                let activeFullscreenUUIDs = Set(",
-              "                    fullscreenStatus.compactMap { key, value in",
-              "                        enabled && value ? key : nil",
-              "                    }",
-              "                )",
-              "                self.fullscreenMenuBarRevealScreens.formIntersection(activeFullscreenUUIDs)",
+              "                if !enabled { self.fullscreenMenuBarRevealScreens.removeAll() }",
               "                self.refreshFullscreenRevealVisibility()",
               "            }",
               "        }",
@@ -289,9 +261,6 @@ jobs:
           app = app.replace(old, "\n".join(launch_lines), 1)
           app_path.write_text(app)
 
-          # Keep the SwiftUI notch drawable in fullscreen so that, when the top-edge
-          # reveal latch deliberately orders the panel front, the normal notch UI is
-          # present and interactive. Window ordering controls visibility instead.
           vm_path = Path("boringNotch/models/BoringViewModel.swift")
           vm = vm_path.read_text()
           old = (
@@ -314,36 +283,32 @@ jobs:
           vm_path.write_text(vm)
 
           win = Path("boringNotch/components/Notch/BoringNotchSkyLightWindow.swift").read_text()
-
           assert ".fullScreenAuxiliary" in win
-          assert "fullscreenMenuBarRevealScreens" in app
-          assert "distanceFromTop <= topEdgeTrigger" in app
-          assert "NSMenu.menuBarVisible()" not in app
+          assert "notchWindow.alphaValue = 0" in app
+          assert "do not orderOut here" in app
           assert "addGlobalMonitorForEvents" in app
-          assert "notchWindow.orderOut(nil)" in app
-          assert "notchWindow.orderFrontRegardless()" in app
+          assert "fullscreenMenuBarRevealScreens.insert(uuid)" in app
           assert "self?.hideOnClosed = false" in vm
 
-          print("v5 top-edge fullscreen reveal latch applied")
+          print("v6 alpha-only fullscreen reveal applied")
           print("fullScreenAuxiliary retained: yes")
-          print("top-edge arm required: yes")
-          print("Chrome tab hover alone triggers notch: no")
-          print("menuBarVisible dependency: removed")
-          print("periodic polling: no")
+          print("hidden by alpha only: yes")
+          print("window remains resident in fullscreen Space: yes")
+          print("top-edge reveal event: yes")
           PY
 
           git diff --check
           git diff -- boringNotch/boringNotchApp.swift boringNotch/models/BoringViewModel.swift
 
       - name: Resolve Swift packages
-        working-directory: boring-notch-v5
+        working-directory: boring-notch-v6
         run: |
           xcodebuild -resolvePackageDependencies \
             -project boringNotch.xcodeproj \
             -scheme boringNotch
 
       - name: Build Release app
-        working-directory: boring-notch-v5
+        working-directory: boring-notch-v6
         run: |
           set -o pipefail
           xcodebuild clean build \
@@ -358,30 +323,30 @@ jobs:
             ONLY_ACTIVE_ARCH=NO | tee build.log
 
       - name: Mark and ad-hoc sign app
-        working-directory: boring-notch-v5
+        working-directory: boring-notch-v6
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
           test -d "$APP"
-          /usr/libexec/PlistBuddy -c 'Add :FullscreenFixVersion string v5-top-edge-reveal' "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :FullscreenFixVersion string v6-alpha-reveal' "$APP/Contents/Info.plist"
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           echo "Fullscreen fix marker: $(/usr/libexec/PlistBuddy -c 'Print :FullscreenFixVersion' "$APP/Contents/Info.plist")"
 
-      - name: Package v5 app
-        working-directory: boring-notch-v5
+      - name: Package v6 app
+        working-directory: boring-notch-v6
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
-          OUT="$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v5.zip"
+          OUT="$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v6.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
-          shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v5.sha256"
-          cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v5.sha256"
+          shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v6.sha256"
+          cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v6.sha256"
 
-      - name: Upload v5 Boring Notch
+      - name: Upload v6 Boring Notch
         uses: actions/upload-artifact@v4
         with:
-          name: boringNotch-fullscreen-fix-v5
+          name: boringNotch-fullscreen-fix-v6
           path: |
-            boringNotch-fullscreen-fix-v5.zip
-            boringNotch-fullscreen-fix-v5.sha256
+            boringNotch-fullscreen-fix-v6.zip
+            boringNotch-fullscreen-fix-v6.sha256
           if-no-files-found: error
           retention-days: 7
