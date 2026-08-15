@@ -1,4 +1,4 @@
-name: Build Final Boring Notch v7
+name: Build Final Boring Notch v8
 
 on:
   push:
@@ -24,30 +24,31 @@ jobs:
 
       - name: Clone Boring Notch
         run: |
-          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-v7
-          cd boring-notch-v7
+          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-v8
+          cd boring-notch-v8
           git checkout 71e50d8a5edc1010ceffa34f34348157183b76e4
           git status --short
 
-      - name: Apply fullscreen top-edge trigger v7
-        working-directory: boring-notch-v7
+      - name: Apply cross-app fullscreen watcher v8
+        working-directory: boring-notch-v8
         run: |
-          python3 "$GITHUB_WORKSPACE/.github/scripts/patch-boring-notch-v7.py"
+          python3 "$GITHUB_WORKSPACE/.github/scripts/patch-boring-notch-v8.py"
           git diff --check
           git diff -- \
             boringNotch/boringNotchApp.swift \
             boringNotch/models/BoringViewModel.swift \
-            boringNotch/ContentView.swift
+            boringNotch/ContentView.swift \
+            boringNotch/components/Notch/BoringNotchSkyLightWindow.swift
 
       - name: Resolve Swift packages
-        working-directory: boring-notch-v7
+        working-directory: boring-notch-v8
         run: |
           xcodebuild -resolvePackageDependencies \
             -project boringNotch.xcodeproj \
             -scheme boringNotch
 
       - name: Build Release app
-        working-directory: boring-notch-v7
+        working-directory: boring-notch-v8
         run: |
           set -o pipefail
           xcodebuild clean build \
@@ -62,30 +63,30 @@ jobs:
             ONLY_ACTIVE_ARCH=NO | tee build.log
 
       - name: Mark and ad-hoc sign app
-        working-directory: boring-notch-v7
+        working-directory: boring-notch-v8
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
           test -d "$APP"
-          /usr/libexec/PlistBuddy -c 'Add :FullscreenFixVersion string v7-tracking-edge-animation' "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :FullscreenFixVersion string v8-crossapp-pointer-animation' "$APP/Contents/Info.plist"
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           echo "Fullscreen fix marker: $(/usr/libexec/PlistBuddy -c 'Print :FullscreenFixVersion' "$APP/Contents/Info.plist")"
 
-      - name: Package v7 app
-        working-directory: boring-notch-v7
+      - name: Package v8 app
+        working-directory: boring-notch-v8
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
-          OUT="$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v7.zip"
+          OUT="$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v8.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
-          shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v7.sha256"
-          cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v7.sha256"
+          shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v8.sha256"
+          cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v8.sha256"
 
-      - name: Upload v7 Boring Notch
+      - name: Upload v8 Boring Notch
         uses: actions/upload-artifact@v4
         with:
-          name: boringNotch-fullscreen-fix-v7
+          name: boringNotch-fullscreen-fix-v8
           path: |
-            boringNotch-fullscreen-fix-v7.zip
-            boringNotch-fullscreen-fix-v7.sha256
+            boringNotch-fullscreen-fix-v8.zip
+            boringNotch-fullscreen-fix-v8.sha256
           if-no-files-found: error
           retention-days: 7
