@@ -33,6 +33,7 @@ jobs:
         working-directory: boring-notch-v9
         run: |
           python3 "$GITHUB_WORKSPACE/.github/scripts/patch-boring-notch-v9.py"
+          python3 "$GITHUB_WORKSPACE/.github/scripts/fix-v9-generated-swift.py"
           git diff --check
           git diff -- \
             boringNotch/boringNotchApp.swift \
