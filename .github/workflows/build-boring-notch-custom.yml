@@ -1,4 +1,4 @@
-name: Build Final Boring Notch v4
+name: Build Final Boring Notch v5
 
 on:
   push:
@@ -24,13 +24,13 @@ jobs:
 
       - name: Clone Boring Notch
         run: |
-          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-v4
-          cd boring-notch-v4
+          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-v5
+          cd boring-notch-v5
           git checkout 71e50d8a5edc1010ceffa34f34348157183b76e4
           git status --short
 
-      - name: Apply fullscreen menu bar sync v4
-        working-directory: boring-notch-v4
+      - name: Apply top-edge fullscreen reveal latch v5
+        working-directory: boring-notch-v5
         run: |
           python3 <<'PY'
           from pathlib import Path
@@ -47,9 +47,10 @@ jobs:
               "    private var fullscreenVisibilityCancellable: AnyCancellable?\n"
               "    private var fullscreenStatusSnapshot: [String: Bool] = [:]\n"
               "    private var fullscreenBehaviorEnabled: Bool = false\n"
-              "    private var globalMenuBarMouseMonitor: Any?\n"
-              "    private var localMenuBarMouseMonitor: Any?\n"
-              "    private var menuBarRefreshWorkItem: DispatchWorkItem?\n"
+              "    private var fullscreenMenuBarRevealScreens: Set<String> = []\n"
+              "    private var globalFullscreenMouseMonitor: Any?\n"
+              "    private var localFullscreenMouseMonitor: Any?\n"
+              "    private var menuBarHideWorkItems: [String: DispatchWorkItem] = [:]\n"
               "    private var dragDetectors: [String: DragDetector] = [:] // UUID -> DragDetector\n"
           )
           if old not in app:
@@ -64,14 +65,15 @@ jobs:
           )
           new = (
               "        MusicManager.shared.destroy()\n"
-              "        menuBarRefreshWorkItem?.cancel()\n"
-              "        if let monitor = globalMenuBarMouseMonitor {\n"
+              "        menuBarHideWorkItems.values.forEach { $0.cancel() }\n"
+              "        menuBarHideWorkItems.removeAll()\n"
+              "        if let monitor = globalFullscreenMouseMonitor {\n"
               "            NSEvent.removeMonitor(monitor)\n"
-              "            globalMenuBarMouseMonitor = nil\n"
+              "            globalFullscreenMouseMonitor = nil\n"
               "        }\n"
-              "        if let monitor = localMenuBarMouseMonitor {\n"
+              "        if let monitor = localFullscreenMouseMonitor {\n"
               "            NSEvent.removeMonitor(monitor)\n"
-              "            localMenuBarMouseMonitor = nil\n"
+              "            localFullscreenMouseMonitor = nil\n"
               "        }\n"
               "        cleanupDragDetectors()\n"
               "        cleanupWindows()\n"
@@ -89,10 +91,7 @@ jobs:
 
           method_lines = [
               "    @MainActor",
-              "    private func refreshFullscreenMenuBarVisibility() {",
-              "        let menuBarVisible = NSMenu.menuBarVisible()",
-              "        let mouseLocation = NSEvent.mouseLocation",
-              "",
+              "    private func refreshFullscreenRevealVisibility() {",
               "        func apply(",
               "            to notchWindow: NSWindow,",
               "            viewModel: BoringViewModel,",
@@ -100,9 +99,8 @@ jobs:
               "        ) {",
               "            let isFullscreen = fullscreenBehaviorEnabled",
               "                && (fullscreenStatusSnapshot[screenUUID] ?? false)",
-              "            let mouseIsOnScreen = NSScreen.screen(withUUID: screenUUID)?",
-              "                .frame.contains(mouseLocation) ?? false",
-              "            let shouldShow = !isFullscreen || (menuBarVisible && mouseIsOnScreen)",
+              "            let revealActive = fullscreenMenuBarRevealScreens.contains(screenUUID)",
+              "            let shouldShow = !isFullscreen || revealActive",
               "",
               "            if shouldShow {",
               "                notchWindow.ignoresMouseEvents = false",
@@ -133,31 +131,104 @@ jobs:
               "    }",
               "",
               "    @MainActor",
-              "    private func handleMenuBarMouseActivity() {",
-              "        refreshFullscreenMenuBarVisibility()",
-              "        menuBarRefreshWorkItem?.cancel()",
+              "    private func scheduleFullscreenRevealHide(for screenUUID: String) {",
+              "        menuBarHideWorkItems[screenUUID]?.cancel()",
+              "",
               "        let item = DispatchWorkItem { [weak self] in",
               "            Task { @MainActor in",
-              "                self?.refreshFullscreenMenuBarVisibility()",
+              "                guard let self = self else { return }",
+              "                self.fullscreenMenuBarRevealScreens.remove(screenUUID)",
+              "                self.menuBarHideWorkItems.removeValue(forKey: screenUUID)",
+              "                self.refreshFullscreenRevealVisibility()",
               "            }",
               "        }",
-              "        menuBarRefreshWorkItem = item",
-              "        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)",
+              "",
+              "        menuBarHideWorkItems[screenUUID] = item",
+              "        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: item)",
               "    }",
               "",
               "    @MainActor",
-              "    private func setupFullscreenMenuBarEventMonitors() {",
-              "        let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .leftMouseUp]",
+              "    private func handleFullscreenMouseActivity() {",
+              "        let mouseLocation = NSEvent.mouseLocation",
               "",
-              "        globalMenuBarMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in",
+              "        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }),",
+              "              let uuid = screen.displayUUID",
+              "        else {",
+              "            refreshFullscreenRevealVisibility()",
+              "            return",
+              "        }",
+              "",
+              "        let isFullscreen = fullscreenBehaviorEnabled",
+              "            && (fullscreenStatusSnapshot[uuid] ?? false)",
+              "",
+              "        guard isFullscreen else {",
+              "            menuBarHideWorkItems[uuid]?.cancel()",
+              "            menuBarHideWorkItems.removeValue(forKey: uuid)",
+              "            fullscreenMenuBarRevealScreens.remove(uuid)",
+              "            refreshFullscreenRevealVisibility()",
+              "            return",
+              "        }",
+              "",
+              "        let distanceFromTop = max(0, screen.frame.maxY - mouseLocation.y)",
+              "        let topEdgeTrigger: CGFloat = 4",
+              "        let interactionBand = max(",
+              "            CGFloat(52),",
+              "            screen.safeAreaInsets.top + 16,",
+              "            NSStatusBar.system.thickness + 24",
+              "        )",
+              "",
+              "        let viewModel: BoringViewModel?",
+              "        if Defaults[.showOnAllDisplays] {",
+              "            viewModel = viewModels[uuid]",
+              "        } else {",
+              "            viewModel = vm.screenUUID == uuid ? vm : nil",
+              "        }",
+              "",
+              "        let interactingWithNotch = viewModel?.isMouseHovering(position: mouseLocation) ?? false",
+              "",
+              "        // Only touching the literal top edge arms the reveal. This avoids",
+              "        // bringing Boring Notch back merely because the pointer is on a",
+              "        // Chrome tab near the top of the fullscreen window.",
+              "        if distanceFromTop <= topEdgeTrigger {",
+              "            menuBarHideWorkItems[uuid]?.cancel()",
+              "            menuBarHideWorkItems.removeValue(forKey: uuid)",
+              "            fullscreenMenuBarRevealScreens.insert(uuid)",
+              "            refreshFullscreenRevealVisibility()",
+              "            return",
+              "        }",
+              "",
+              "        guard fullscreenMenuBarRevealScreens.contains(uuid) else {",
+              "            refreshFullscreenRevealVisibility()",
+              "            return",
+              "        }",
+              "",
+              "        if distanceFromTop <= interactionBand || interactingWithNotch {",
+              "            menuBarHideWorkItems[uuid]?.cancel()",
+              "            menuBarHideWorkItems.removeValue(forKey: uuid)",
+              "            refreshFullscreenRevealVisibility()",
+              "        } else {",
+              "            scheduleFullscreenRevealHide(for: uuid)",
+              "        }",
+              "    }",
+              "",
+              "    @MainActor",
+              "    private func setupFullscreenMouseMonitors() {",
+              "        let mask: NSEvent.EventTypeMask = [",
+              "            .mouseMoved,",
+              "            .leftMouseDragged,",
+              "            .leftMouseDown,",
+              "            .leftMouseUp,",
+              "        ]",
+              "",
+              "        globalFullscreenMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in",
               "            Task { @MainActor in",
-              "                self?.handleMenuBarMouseActivity()",
+              "                self?.handleFullscreenMouseActivity()",
               "            }",
               "        }",
               "",
-              "        localMenuBarMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in",
+              "        localFullscreenMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in",
               "            Task { @MainActor in",
-              "                self?.handleMenuBarMouseActivity()",
+              "                self?.handleFullscreenMouseActivity()",
               "            }",
               "            return event",
               "        }",
@@ -168,7 +239,7 @@ jobs:
           app = app[:marker_start] + cleanup_block + "\n".join(method_lines) + app[marker_end:]
 
           old = "        window.alphaValue = 1\n    }\n\n    func applicationDidFinishLaunching"
-          new = "        window.alphaValue = 1\n        refreshFullscreenMenuBarVisibility()\n    }\n\n    func applicationDidFinishLaunching"
+          new = "        window.alphaValue = 1\n        refreshFullscreenRevealVisibility()\n    }\n\n    func applicationDidFinishLaunching"
           if old not in app:
               raise SystemExit("positionWindow anchor not found")
           app = app.replace(old, new, 1)
@@ -194,14 +265,21 @@ jobs:
               "            Task { @MainActor in",
               "                self.fullscreenStatusSnapshot = fullscreenStatus",
               "                self.fullscreenBehaviorEnabled = enabled",
-              "                self.refreshFullscreenMenuBarVisibility()",
+              "",
+              "                let activeFullscreenUUIDs = Set(",
+              "                    fullscreenStatus.compactMap { key, value in",
+              "                        enabled && value ? key : nil",
+              "                    }",
+              "                )",
+              "                self.fullscreenMenuBarRevealScreens.formIntersection(activeFullscreenUUIDs)",
+              "                self.refreshFullscreenRevealVisibility()",
               "            }",
               "        }",
               "",
               "        fullscreenStatusSnapshot = FullscreenMediaDetector.shared.fullscreenStatus",
               "        fullscreenBehaviorEnabled = Defaults[.hideNotchOption] != .never",
-              "        setupFullscreenMenuBarEventMonitors()",
-              "        refreshFullscreenMenuBarVisibility()",
+              "        setupFullscreenMouseMonitors()",
+              "        refreshFullscreenRevealVisibility()",
               "",
               "        setupDragDetectors()",
               "",
@@ -211,6 +289,9 @@ jobs:
           app = app.replace(old, "\n".join(launch_lines), 1)
           app_path.write_text(app)
 
+          # Keep the SwiftUI notch drawable in fullscreen so that, when the top-edge
+          # reveal latch deliberately orders the panel front, the normal notch UI is
+          # present and interactive. Window ordering controls visibility instead.
           vm_path = Path("boringNotch/models/BoringViewModel.swift")
           vm = vm_path.read_text()
           old = (
@@ -233,18 +314,21 @@ jobs:
           vm_path.write_text(vm)
 
           win = Path("boringNotch/components/Notch/BoringNotchSkyLightWindow.swift").read_text()
+
           assert ".fullScreenAuxiliary" in win
-          assert "NSMenu.menuBarVisible()" in app
+          assert "fullscreenMenuBarRevealScreens" in app
+          assert "distanceFromTop <= topEdgeTrigger" in app
+          assert "NSMenu.menuBarVisible()" not in app
           assert "addGlobalMonitorForEvents" in app
-          assert "addLocalMonitorForEvents" in app
           assert "notchWindow.orderOut(nil)" in app
           assert "notchWindow.orderFrontRegardless()" in app
           assert "self?.hideOnClosed = false" in vm
 
-          print("v4 fullscreen menu-bar sync applied")
+          print("v5 top-edge fullscreen reveal latch applied")
           print("fullScreenAuxiliary retained: yes")
-          print("hidden while menu bar hidden: yes")
-          print("shown while menu bar revealed: yes")
+          print("top-edge arm required: yes")
+          print("Chrome tab hover alone triggers notch: no")
+          print("menuBarVisible dependency: removed")
           print("periodic polling: no")
           PY
 
@@ -252,14 +336,14 @@ jobs:
           git diff -- boringNotch/boringNotchApp.swift boringNotch/models/BoringViewModel.swift
 
       - name: Resolve Swift packages
-        working-directory: boring-notch-v4
+        working-directory: boring-notch-v5
         run: |
           xcodebuild -resolvePackageDependencies \
             -project boringNotch.xcodeproj \
             -scheme boringNotch
 
       - name: Build Release app
-        working-directory: boring-notch-v4
+        working-directory: boring-notch-v5
         run: |
           set -o pipefail
           xcodebuild clean build \
@@ -274,30 +358,30 @@ jobs:
             ONLY_ACTIVE_ARCH=NO | tee build.log
 
       - name: Mark and ad-hoc sign app
-        working-directory: boring-notch-v4
+        working-directory: boring-notch-v5
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
           test -d "$APP"
-          /usr/libexec/PlistBuddy -c 'Add :FullscreenFixVersion string v4-menu-bar-sync' "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :FullscreenFixVersion string v5-top-edge-reveal' "$APP/Contents/Info.plist"
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           echo "Fullscreen fix marker: $(/usr/libexec/PlistBuddy -c 'Print :FullscreenFixVersion' "$APP/Contents/Info.plist")"
 
-      - name: Package v4 app
-        working-directory: boring-notch-v4
+      - name: Package v5 app
+        working-directory: boring-notch-v5
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
-          OUT="$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v4.zip"
+          OUT="$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v5.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
-          shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v4.sha256"
-          cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v4.sha256"
+          shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v5.sha256"
+          cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v5.sha256"
 
-      - name: Upload v4 Boring Notch
+      - name: Upload v5 Boring Notch
         uses: actions/upload-artifact@v4
         with:
-          name: boringNotch-fullscreen-fix-v4
+          name: boringNotch-fullscreen-fix-v5
           path: |
-            boringNotch-fullscreen-fix-v4.zip
-            boringNotch-fullscreen-fix-v4.sha256
+            boringNotch-fullscreen-fix-v5.zip
+            boringNotch-fullscreen-fix-v5.sha256
           if-no-files-found: error
           retention-days: 7
