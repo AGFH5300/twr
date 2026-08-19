@@ -1,4 +1,4 @@
-name: Build Final Boring Notch v10
+name: Build Final Boring Notch v11
 
 on:
   push:
@@ -24,17 +24,18 @@ jobs:
 
       - name: Clone Boring Notch
         run: |
-          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-v10
-          cd boring-notch-v10
+          git clone https://github.com/TheBoredTeam/boring.notch.git boring-notch-v11
+          cd boring-notch-v11
           git checkout 71e50d8a5edc1010ceffa34f34348157183b76e4
           git status --short
 
-      - name: Apply v9 fullscreen fix and v10 Accessibility fix
-        working-directory: boring-notch-v10
+      - name: Apply v9 fullscreen, v10 Accessibility, and v11 click-through fixes
+        working-directory: boring-notch-v11
         run: |
           python3 "$GITHUB_WORKSPACE/.github/scripts/patch-boring-notch-v9.py"
           python3 "$GITHUB_WORKSPACE/.github/scripts/fix-v9-generated-swift.py"
           python3 "$GITHUB_WORKSPACE/.github/scripts/patch-boring-notch-v10-accessibility.py"
+          python3 "$GITHUB_WORKSPACE/.github/scripts/patch-boring-notch-v11-clickthrough.py"
           git diff --check
           git diff -- \
             boringNotch/boringNotchApp.swift \
@@ -43,14 +44,14 @@ jobs:
             boringNotch/XPCHelperClient/XPCHelperClient.swift
 
       - name: Resolve Swift packages
-        working-directory: boring-notch-v10
+        working-directory: boring-notch-v11
         run: |
           xcodebuild -resolvePackageDependencies \
             -project boringNotch.xcodeproj \
             -scheme boringNotch
 
       - name: Build Release app
-        working-directory: boring-notch-v10
+        working-directory: boring-notch-v11
         run: |
           set -o pipefail
           xcodebuild clean build \
@@ -65,30 +66,30 @@ jobs:
             ONLY_ACTIVE_ARCH=NO | tee build.log
 
       - name: Mark and ad-hoc sign app
-        working-directory: boring-notch-v10
+        working-directory: boring-notch-v11
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
           test -d "$APP"
-          /usr/libexec/PlistBuddy -c 'Add :FullscreenFixVersion string v10-main-app-accessibility-v9-fullscreen' "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :FullscreenFixVersion string v11-clickthrough-v10-accessibility-v9-fullscreen' "$APP/Contents/Info.plist"
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           echo "Build marker: $(/usr/libexec/PlistBuddy -c 'Print :FullscreenFixVersion' "$APP/Contents/Info.plist")"
 
-      - name: Package v10 app
-        working-directory: boring-notch-v10
+      - name: Package v11 app
+        working-directory: boring-notch-v11
         run: |
           APP="$PWD/build/Build/Products/Release/boringNotch.app"
-          OUT="$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v10.zip"
+          OUT="$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v11.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
-          shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v10.sha256"
-          cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v10.sha256"
+          shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v11.sha256"
+          cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v11.sha256"
 
-      - name: Upload v10 Boring Notch
+      - name: Upload v11 Boring Notch
         uses: actions/upload-artifact@v4
         with:
-          name: boringNotch-fullscreen-fix-v10
+          name: boringNotch-fullscreen-fix-v11
           path: |
-            boringNotch-fullscreen-fix-v10.zip
-            boringNotch-fullscreen-fix-v10.sha256
+            boringNotch-fullscreen-fix-v11.zip
+            boringNotch-fullscreen-fix-v11.sha256
           if-no-files-found: error
           retention-days: 7
