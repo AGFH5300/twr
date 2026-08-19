@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -84,7 +84,7 @@ jobs:
           shasum -a 256 "$OUT" > "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v11.sha256"
           cat "$GITHUB_WORKSPACE/boringNotch-fullscreen-fix-v11.sha256"
 
-      - name: Upload v11 Boring Notch
+      - name: Upload v11 Boring Notch artifact
         uses: actions/upload-artifact@v4
         with:
           name: boringNotch-fullscreen-fix-v11
@@ -93,3 +93,20 @@ jobs:
             boringNotch-fullscreen-fix-v11.sha256
           if-no-files-found: error
           retention-days: 7
+
+      - name: Publish v11 release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view boring-notch-v11 >/dev/null 2>&1; then
+            gh release upload boring-notch-v11 \
+              boringNotch-fullscreen-fix-v11.zip \
+              boringNotch-fullscreen-fix-v11.sha256 \
+              --clobber
+          else
+            gh release create boring-notch-v11 \
+              boringNotch-fullscreen-fix-v11.zip \
+              boringNotch-fullscreen-fix-v11.sha256 \
+              --title "Boring Notch v11 custom" \
+              --notes "v9 fullscreen behavior + v10 main-app Accessibility + v11 transparent-window click-through fix."
+          fi
