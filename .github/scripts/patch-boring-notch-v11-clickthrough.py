@@ -19,20 +19,24 @@ replacement = '''    @MainActor
                 && (fullscreenStatusSnapshot[screenUUID] ?? false)
             if fullscreenOwnsMouseRouting { return }
 
-            // When the notch is open, every visible control in the full 640x210
-            // panel must remain interactive. When it is closed, only the actual
-            // collapsed notch should capture pointer events; the transparent
-            // remainder of the fixed-size panel must click through to Finder or
-            // the app underneath.
-            let shouldAcceptMouse: Bool
-            if viewModel.notchState == .open
-                || viewModel.fullscreenInteractionActive
+            // The AppKit panel is always the full open-notch size (640x210),
+            // even while SwiftUI draws only the small collapsed notch. A clear
+            // NSPanel still receives mouse events, so its invisible area can
+            // otherwise block Finder/Desktop and the app underneath.
+            //
+            // Keep the whole panel interactive only while something genuinely
+            // uses the expanded footprint. In the normal closed state, enable
+            // mouse handling only when the pointer is over the actual collapsed
+            // notch; everywhere else becomes click-through.
+            let expandedInteractionActive = viewModel.notchState == .open
+                || coordinator.expandingView.show
+                || coordinator.sneakPeek.show
+                || viewModel.isBatteryPopoverActive
+                || viewModel.isCameraExpanded
                 || SharingStateManager.shared.preventNotchClose
-            {
-                shouldAcceptMouse = true
-            } else {
-                shouldAcceptMouse = viewModel.isMouseHovering(position: mouse)
-            }
+
+            let shouldAcceptMouse = expandedInteractionActive
+                || viewModel.isMouseHovering(position: mouse)
 
             let shouldIgnore = !shouldAcceptMouse
             if notchWindow.ignoresMouseEvents != shouldIgnore {
@@ -55,9 +59,8 @@ replacement = '''    @MainActor
     private func handleFullscreenPointerTick() {
         let mouse = NSEvent.mouseLocation
 
-        // The same lightweight in-process pointer watcher used by the fullscreen
-        // fix also prevents the transparent part of the fixed-size notch panel
-        // from stealing clicks in normal Spaces.
+        // Reuse the existing lightweight in-process pointer watcher. This is
+        // not shell polling and adds no second timer.
         updateNormalMousePassthrough(mouse: mouse)
 
         guard fullscreenBehaviorEnabled else { return }
@@ -90,5 +93,6 @@ path.write_text(text)
 updated = path.read_text()
 assert "private func updateNormalMousePassthrough(mouse: NSPoint)" in updated
 assert "updateNormalMousePassthrough(mouse: mouse)" in updated
-assert "shouldAcceptMouse = viewModel.isMouseHovering(position: mouse)" in updated
+assert "coordinator.expandingView.show" in updated
+assert "shouldAcceptMouse = expandedInteractionActive" in updated
 print("Applied v11 transparent-window click-through patch")
