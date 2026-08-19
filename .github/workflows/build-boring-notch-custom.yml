@@ -110,3 +110,16 @@ jobs:
               --title "Boring Notch v11 custom" \
               --notes "v9 fullscreen behavior + v10 main-app Accessibility + v11 transparent-window click-through fix."
           fi
+
+      - name: Record v11 workflow run id
+        if: always()
+        run: |
+          printf '%s\n' "$GITHUB_RUN_ID" > .github/last-v11-run-id.txt
+          printf '%s\n' "$GITHUB_SHA" > .github/last-v11-head-sha.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/last-v11-run-id.txt .github/last-v11-head-sha.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Record v11 build run $GITHUB_RUN_ID [skip ci]"
+            git push
+          fi
